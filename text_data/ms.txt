@@ -1,0 +1,123 @@
+**Maintenance and Support**
+
+Below is a concise overview of the key tasks and phases we follow to keep applications running smoothly after deployment:
+
+---
+
+1. **Monitoring & Incident Management**
+
+   * **Proactive Monitoring**:
+
+     * Set up application health checks (e.g., uptime, response latency).
+     * Track logs and metrics (CPU, memory, error rates) via a monitoring tool (CloudWatch, Datadog, Prometheus).
+   * **Alert Configuration**:
+
+     * Define alert thresholds (e.g., error rate > 5% for 5 minutes).
+     * Configure notifications (Slack, email, PagerDuty) to ensure rapid response.
+   * **Incident Triage**:
+
+     * When an alert fires, perform initial assessment (severity, impact).
+     * Classify incidents as “critical” (system down), “major” (partial degradation), or “minor” (low-priority bug).
+
+2. **Bug Fixes & Patches**
+
+   * **Issue Logging & Prioritization**:
+
+     * Collect bug reports from monitoring, end-users, or support tickets.
+     * Triage by severity and assign SLAs (e.g., critical bugs resolved within 4 hours, major within 24 hours).
+   * **Root Cause Analysis (RCA)**:
+
+     * Quickly reproduce the issue in a staging environment.
+     * Identify the underlying cause (code defect, configuration drift, infrastructure failure).
+   * **Patch Development & Release**:
+
+     * Implement fixes in a feature branch, write or update unit/integration tests.
+     * Deploy patch to staging for validation (smoke tests).
+     * Roll out to production via a fast-tracked CI/CD pipeline, monitoring immediately for regressions.
+
+3. **Performance Tuning & Optimization**
+
+   * **Periodic Performance Reviews**:
+
+     * Analyze trends in resource utilization and response times.
+     * Identify slow database queries, memory leaks, or inefficient loops.
+   * **Optimization Actions**:
+
+     * Refine database indexes, add caching layers (Redis, CDN), or adjust auto-scaling policies.
+     * Update code paths (e.g., batch processing instead of row-by-row) to improve throughput.
+   * **Validation**:
+
+     * Run targeted load tests on optimized components to confirm performance gains before merging to production.
+
+4. **Security Updates & Compliance**
+
+   * **Dependency Scanning**:
+
+     * Regularly scan third-party libraries for vulnerabilities (Snyk, Dependabot).
+     * Prioritize and patch high-severity issues within a defined window (e.g., 72 hours).
+   * **Security Audits**:
+
+     * Conduct lightweight penetration checks or periodic SAST scans.
+     * Apply configuration hardening (firewall rules, IAM policy reviews) as needed.
+   * **Compliance Maintenance**:
+
+     * Ensure ongoing adherence to relevant standards (GDPR, HIPAA, SOC 2).
+     * Update data handling procedures and documentation whenever regulations change.
+
+5. **Feature Enhancements & Minor Upgrades**
+
+   * **Backlog Management**:
+
+     * Maintain a prioritized list of small enhancements or UX improvements.
+     * Estimate effort and schedule these tasks in minor release cycles (e.g., monthly).
+   * **Implementation & Testing**:
+
+     * Develop enhancements following the same development workflow (branch → PR → review → staging → production).
+     * Run regression tests to confirm existing functionality remains unaffected.
+   * **Release & Communication**:
+
+     * Bundle minor enhancements into a regular release.
+     * Share release notes summarizing new features and fixes with stakeholders.
+
+6. **Backup, Disaster Recovery & Documentation**
+
+   * **Backup Procedures**:
+
+     * Schedule automated backups for databases and file storage (daily snapshots, weekly full backups).
+     * Periodically test restore procedures in a separate environment to verify data integrity.
+   * **Disaster Recovery Plan**:
+
+     * Define RTO (Recovery Time Objective) and RPO (Recovery Point Objective).
+     * Document step-by-step recovery actions (e.g., “Restore DB from latest backup, redeploy container images, update DNS”).
+   * **Support Documentation**:
+
+     * Maintain a concise runbook covering common incidents, troubleshooting steps, and contact points.
+     * Update documentation whenever there’s a significant change to the system or dependencies.
+
+7. **Roles & Responsibilities (Condensed)**
+
+   * **Support Engineer**:
+
+     * Monitors alerts, triages incidents, and applies quick fixes or escalates to developers.
+   * **Developer**:
+
+     * Investigates root cause, implements patches, and writes corresponding tests.
+   * **DevOps/Infrastructure Engineer**:
+
+     * Manages backups, configures monitoring infrastructure, and oversees disaster recovery drills.
+   * **Security Specialist**:
+
+     * Reviews scan results, applies security patches, and updates compliance documentation.
+   * **Product Owner / Stakeholder**:
+
+     * Reviews periodic maintenance reports, prioritizes enhancements, and approves minor release schedules.
+
+8. **Deliverables (Streamlined)**
+
+   * **Incident Reports & RCA Summaries**: Brief write-ups on major incidents—root cause, resolution steps, and preventive measures.
+   * **Patch Release Notes**: One-page summary of critical fixes applied, affected components, and any required user actions.
+   * **Performance & Security Review Reports**: Quarterly summaries highlighting optimizations made, vulnerabilities addressed, and compliance status.
+   * **Runbook & Disaster Recovery Guide**: A single document detailing backup schedules, restore steps, and escalation paths.
+   * **Enhancement Release Notes**: Short summaries for minor feature additions and UX improvements.
+
+---

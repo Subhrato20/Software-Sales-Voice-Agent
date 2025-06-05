@@ -1,0 +1,31 @@
+The list of services provided by us are:
+
+1. **Custom Software Development**
+   We design and build scalable, secure applications tailored to your business needs using modern frameworks and best practices.
+
+2. **Software Consulting and Advisory**
+   Our experts analyze your requirements and provide strategic guidance on architecture, technology selection, and development roadmaps to optimize ROI.
+
+3. **Cloud Migration and Integration**
+   We help you transition legacy systems to cloud platforms (AWS, Azure, GCP), ensuring minimal downtime and seamless data synchronization.
+
+4. **DevOps and CI/CD Implementation**
+   Implement automated build, test, and deployment pipelines to accelerate time-to-market, improve code quality, and streamline operations.
+
+5. **AI & Machine Learning Solutions**
+   Develop and integrate data-driven models (classification, regression, clustering) into your applications to automate decision-making and gain actionable insights.
+
+6. **RAG (Retrieval-Augmented Generation) Implementation**
+   Build end-to-end RAG pipelines that combine your knowledge base with large language models, delivering accurate, contextually enriched responses for chatbots and search interfaces.
+
+7. **Data Engineering and Analytics**
+   Design ETL/ELT workflows, construct data warehouses or lakes, and provide dashboards or reporting solutions to transform raw data into strategic intelligence.
+
+8. **UI/UX Design and Prototyping**
+   Create intuitive, responsive interfaces based on user research and wireframing, ensuring a seamless experience across desktop and mobile platforms.
+
+9. **Quality Assurance and Testing**
+   Conduct end-to-end testing (unit, integration, performance, security) and set up automated test suites to catch defects early and maintain high software reliability.
+
+10. **Maintenance and Support**
+    Offer 24/7 monitoring, bug fixes, performance tuning, and feature enhancements to keep your applications running smoothly and up-to-date.
