@@ -236,12 +236,11 @@ class LlmClient:
             )
 
     async def draft_response(self, request: ResponseRequiredRequest):
-        """
-        Main response generator: handles openai function calls, RAG searches, 
-        mem0 persistence, and streaming back to the caller.
-        """
         prompt_msgs = self.prepare_prompt_messages(request)
         logger.debug("Prompt messages:\n%s", json.dumps(prompt_msgs, indent=2))
+
+        last_user = request.transcript[-1].content if request.transcript else None
+        collected_reply = ""
 
         try:
             stream = await self.client.chat.completions.create(
@@ -254,12 +253,11 @@ class LlmClient:
 
             func_name = None
             func_args = ""
-            collected_reply = ""
 
             async for chunk in stream:
                 delta = chunk.choices[0].delta
 
-                # — Plain text content —
+                # — accumulate any plain-text reply —
                 if delta.content:
                     collected_reply += delta.content
                     yield ResponseResponse(
@@ -269,40 +267,37 @@ class LlmClient:
                         end_call=False,
                     )
 
-                # — Function call metadata collection —
+                # — gather function_call metadata —
                 if getattr(delta, "function_call", None):
-                    if delta.function_call.name:
-                        func_name = delta.function_call.name
-                    if delta.function_call.arguments:
-                        func_args += delta.function_call.arguments
+                    func_name = func_name or delta.function_call.name
+                    func_args += delta.function_call.arguments or ""
 
-                # — When function call completes → execute tool and format response —
+                # — once the LLM signals “function_call” is done, run it —
                 if chunk.choices[0].finish_reason == "function_call":
                     try:
                         fargs = json.loads(func_args)
                     except json.JSONDecodeError:
-                        logger.exception("Invalid function_call JSON: %s", func_args)
                         yield ResponseResponse(
                             response_id=request.response_id,
-                            content="Sorry, I couldn't understand that request.",
+                            content="Sorry, I couldn't parse that request.",
                             content_complete=True,
                             end_call=False,
                         )
-                        return
+                        break
 
                     logger.info("Executing %s with %s", func_name, fargs)
 
+                    # handle your two tools…
                     if func_name == "knowledge_base_search":
                         result = await asyncio.to_thread(
                             self.rag_handler.search_documents_with_links,
-                            fargs.get("query", "")
+                            fargs["query"]
                         )
+                        # re-stream the formatted answer
                         async for evt in self.handle_tool_call_response(
-                            request,
-                            function_name=func_name,
-                            original_query=fargs.get("query", ""),
-                            tool_result=result
+                            request, func_name, fargs["query"], result
                         ):
+                            collected_reply += evt.content
                             yield evt
 
                     elif func_name == "end_call":
@@ -321,9 +316,25 @@ class LlmClient:
                             content_complete=True,
                             end_call=False,
                         )
-                    return
 
-            # — No function call → end of turn —
+                    # — ✏️ Persist after function call too —
+                    if self.user_id and last_user:
+                        try:
+                            await asyncio.to_thread(
+                                self.memory_client.add,
+                                [
+                                    {"role": "user",    "content": last_user},
+                                    {"role": "assistant","content": collected_reply}
+                                ],
+                                self.user_id,
+                                {"version": "v2"}
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to store turn in Mem0: %s", e)
+
+                    return  # now exit after saving
+
+            # — no function call at all — finish streaming the free-form reply
             yield ResponseResponse(
                 response_id=request.response_id,
                 content="",
@@ -331,17 +342,17 @@ class LlmClient:
                 end_call=False,
             )
 
-            # — Persist turn into Mem0 :contentReference[oaicite:3]{index=3}
-            if self.user_id and request.transcript:
-                last_user = request.transcript[-1].content
+            # — ✏️ And persist this turn, too —
+            if self.user_id and last_user:
                 try:
-                    self.memory_client.add(
+                    await asyncio.to_thread(
+                        self.memory_client.add,
                         [
-                            {"role": "user", "content": last_user},
-                            {"role": "assistant", "content": collected_reply}
+                            {"role": "user",    "content": last_user},
+                            {"role": "assistant","content": collected_reply}
                         ],
-                        user_id=self.user_id,
-                        version="v2",
+                        self.user_id,
+                        {"version": "v2"}
                     )
                 except Exception as e:
                     logger.warning("Failed to store turn in Mem0: %s", e)
@@ -354,3 +365,4 @@ class LlmClient:
                 content_complete=True,
                 end_call=False,
             )
+
