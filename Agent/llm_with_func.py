@@ -1,5 +1,3 @@
-# Agent/llm_with_func.py
-
 import logging
 import os
 import json
@@ -14,7 +12,6 @@ from RAG.milvus_search import RAGHandler
 logging.basicConfig(level=logging.DEBUG,
                     format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
-
 
 BEGIN_SENTENCE = (
     "Hello! Thanks for your interest in our software services. "
@@ -39,10 +36,9 @@ AGENT_PROMPT = (
 
 class LlmClient:
     def __init__(self):
-        # Only using Gemini in your setup
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("GEMINI_API_KEY must be set in the environment")
+            raise ValueError("OPENAI_API_KEY must be set in the environment")
         self.client = AsyncOpenAI(
             api_key=api_key,
         )
@@ -73,8 +69,7 @@ class LlmClient:
     ) -> List[dict]:
         system = {
             "role": "system",
-            "content": "You are in a voice call. Respond based on the transcript and rules:\n\n"
-                       + AGENT_PROMPT
+            "content": "You are in a voice call. Respond based on the transcript and rules:\n\n" + AGENT_PROMPT
         }
         user_msgs = self.convert_transcript_to_openai_messages(request.transcript)
         if request.interaction_type == "reminder_required":
@@ -129,35 +124,36 @@ class LlmClient:
         tool_result: str,
     ):
         """
-        After the model calls a function, feed that tool output back in so the
-        model can reply naturally.
+        Takes the raw tool_result (the <page>…</page> blobs) and asks the LLM
+        to turn it into a concise, friendly answer to the user's original_query.
         """
         try:
-            msgs = self.prepare_prompt_messages(request)
-            msgs.append({
-                "role": "assistant",
-                "content": None,
-                "function_call": {
-                    "name": function_name,
-                    "arguments": json.dumps({"query": original_query})
-                }
-            })
-            msgs.append({
-                "role": "tool",
-                "name": function_name,
-                "content": tool_result
-            })
+            # 1) Build a fresh prompt that tells the model to reformat the KB output.
+            formatting_msgs = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional, friendly AI assistant. "
+                        "The user asked: “" + original_query + "”.\n\n"
+                        "Below is the raw information retrieved from the knowledge base.\n"
+                        "Please condense it into a concise, accurate, and helpful reply. and remove **"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": tool_result,
+                },
+            ]
 
-            logger.debug("Wrapping tool result back to model…")
+            logger.debug("Formatting tool result into final answer…")
             stream = await self.client.chat.completions.create(
                 model=self.model_name,
-                messages=msgs,
-                stream=True
+                messages=formatting_msgs,
+                stream=True,
             )
 
             full = ""
             async for chunk in stream:
-                logger.debug("↳ wrap-up chunk: %s", chunk)
                 delta = chunk.choices[0].delta
                 if delta.content:
                     full += delta.content
@@ -168,6 +164,7 @@ class LlmClient:
                         end_call=False,
                     )
 
+            # signal end of turn
             if full:
                 yield ResponseResponse(
                     response_id=request.response_id,
@@ -177,7 +174,7 @@ class LlmClient:
                 )
 
         except Exception:
-            logger.exception("Error in handle_tool_call_response")
+            logger.exception("Error formatting the answer")
             yield ResponseResponse(
                 response_id=request.response_id,
                 content="Sorry, something went wrong formatting the answer.",
@@ -185,11 +182,8 @@ class LlmClient:
                 end_call=False,
             )
 
+
     async def draft_response(self, request: ResponseRequiredRequest):
-        """
-        The heart of the pipeline: send prompt + functions, watch for function_call,
-        invoke RAG, and stream back the final reply.
-        """
         prompt_msgs = self.prepare_prompt_messages(request)
         logger.debug("Prompt messages:\n%s", json.dumps(prompt_msgs, indent=2))
 
@@ -201,6 +195,9 @@ class LlmClient:
                 functions=self.prepare_functions(),
                 function_call="auto",
             )
+
+            func_name = None
+            func_args = ""
 
             async for chunk in stream:
                 logger.debug("↳ LLM chunk: %s", chunk)
@@ -215,25 +212,42 @@ class LlmClient:
                         end_call=False,
                     )
 
-                # 2) Tool invocation
-                if getattr(delta, "function_call", None) and \
-                   chunk.choices[0].finish_reason == "function_call":
-                    fname = delta.function_call.name
-                    args_str = delta.function_call.arguments
-                    logger.info("🛠 Model wants to call %s with %s", fname, args_str)
+                # 2) Collect function name and arguments
+                if getattr(delta, "function_call", None):
+                    if delta.function_call.name:
+                        func_name = delta.function_call.name
+                    if delta.function_call.arguments:
+                        func_args += delta.function_call.arguments
 
+                # 3) Once the model finishes calling the function, handle it
+                if chunk.choices[0].finish_reason == "function_call":
                     try:
-                        fargs = json.loads(args_str)
-                    except Exception:
-                        logger.exception("Failed to parse function_call.arguments")
-                        raise
-
-                    if fname == "knowledge_base_search":
-                        query = fargs.get("query", "")
-                        result = await asyncio.to_thread(
-                            self.rag_handler.search_documents_with_links, query
+                        fargs = json.loads(func_args)
+                    except json.JSONDecodeError:
+                        logger.exception("Failed to parse function_call JSON: %s", func_args)
+                        yield ResponseResponse(
+                            response_id=request.response_id,
+                            content="Sorry, I couldn’t understand the request.",
+                            content_complete=True,
+                            end_call=False,
                         )
-                    elif fname == "end_call":
+                        return
+
+                    logger.info("🛠 Executing %s with %s", func_name, fargs)
+
+                    if func_name == "knowledge_base_search":
+                        result = await asyncio.to_thread(
+                            self.rag_handler.search_documents_with_links, fargs.get("query", "")
+                        )
+                        async for evt in self.handle_tool_call_response(
+                            request,
+                            function_name=func_name,
+                            original_query=fargs.get("query", ""),
+                            tool_result=result
+                        ):
+                            yield evt
+
+                    elif func_name == "end_call":
                         msg = fargs.get("message", "Thank you, goodbye!")
                         yield ResponseResponse(
                             response_id=request.response_id,
@@ -241,22 +255,16 @@ class LlmClient:
                             content_complete=True,
                             end_call=True,
                         )
-                        return
                     else:
-                        result = f"Error: Unknown function '{fname}'"
+                        yield ResponseResponse(
+                            response_id=request.response_id,
+                            content=f"Error: Unknown function '{func_name}'",
+                            content_complete=True,
+                            end_call=False,
+                        )
+                    return
 
-                    # hand off to wrapper
-                    async for evt in self.handle_tool_call_response(
-                        request,
-                        function_name=fname,
-                        original_query=query,
-                        tool_result=result
-                    ):
-                        yield evt
-
-                    return  # done with this turn
-
-            # 3) No function call occurred: end turn anyway
+            # no function call: end turn
             yield ResponseResponse(
                 response_id=request.response_id,
                 content="",
@@ -266,7 +274,6 @@ class LlmClient:
 
         except Exception:
             logger.exception("Error during draft_response")
-            # surface the exception for debugging
             yield ResponseResponse(
                 response_id=request.response_id,
                 content="Error! Check server logs for details.",
