@@ -2,22 +2,25 @@ import logging
 import os
 import json
 import asyncio
-from typing import List
+from typing import List, Optional
 
 from openai import AsyncOpenAI
+from mem0 import MemoryClient
 from .custom_types import ResponseRequiredRequest, ResponseResponse, Utterance
 from RAG.milvus_search import RAGHandler
 
 # — Configure module-wide logging —
-logging.basicConfig(level=logging.DEBUG,
-                    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s"
+)
 logger = logging.getLogger(__name__)
 
-BEGIN_SENTENCE = (
-    "Hello! Thanks for your interest in our software services. "
-    "I'm here to help answer any questions you have. How can I assist you today?"
-)
+# — Greeting templates —
+BEGIN_SENTENCE_KNOWN = "Hi {name}, thanks for calling! How can I help you today?"
+BEGIN_SENTENCE_UNKNOWN = "Hello! To get started, may I have your name?"
 
+# — Core AI prompt —
 AGENT_PROMPT = (
     "Task: You are an AI Software Sales Agent. Your primary goal is to understand "
     "prospective customers' needs, provide them with relevant information about our software, "
@@ -36,21 +39,38 @@ AGENT_PROMPT = (
 
 class LlmClient:
     def __init__(self):
+        # — OpenAI client setup —
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY must be set in the environment")
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-        )
-        self.model_name = os.getenv(
-            "GEMINI_MODEL", "gpt-4o"
-        )
+        self.client = AsyncOpenAI(api_key=api_key)
+        self.model_name = os.getenv("GEMINI_MODEL", "gpt-4o")
+
+        # — RAG handler for KB searches —
         self.rag_handler = RAGHandler()
 
+        # — Mem0 client for long-term memory :contentReference[oaicite:0]{index=0}
+        self.memory_client = MemoryClient(
+            api_key=os.getenv("MEM0_API_KEY"),
+            org_id=os.getenv("MEM0_ORG_ID"),
+            project_id=os.getenv("MEM0_PROJECT_ID"),
+        )
+        self.user_id: Optional[str] = None
+
     def draft_begin_message(self) -> ResponseResponse:
+        """
+        On a brand-new call, ask for name if unknown or greet by name.
+        """
+        if not self.user_id:
+            return ResponseResponse(
+                response_id=0,
+                content=BEGIN_SENTENCE_UNKNOWN,
+                content_complete=True,
+                end_call=False,
+            )
         return ResponseResponse(
             response_id=0,
-            content=BEGIN_SENTENCE,
+            content=BEGIN_SENTENCE_KNOWN.format(name=self.user_id),
             content_complete=True,
             end_call=False,
         )
@@ -67,16 +87,54 @@ class LlmClient:
     def prepare_prompt_messages(
         self, request: ResponseRequiredRequest
     ) -> List[dict]:
-        system = {
-            "role": "system",
-            "content": "You are in a voice call. Respond based on the transcript and rules:\n\n" + AGENT_PROMPT
-        }
+        # — Capture name on first turn —
+        if not self.user_id and request.transcript:
+            candidate = request.transcript[-1].content.strip()
+            self.user_id = candidate
+            logger.info("Set user_id to '%s'", self.user_id)
+            try:
+                self.memory_client.add(
+                    [{"role": "user", "content": f"My name is {self.user_id}"}],
+                    user_id=self.user_id,
+                )
+            except Exception as e:
+                logger.warning("Failed to store name in Mem0: %s", e)
+
+        # — Retrieve up to 5 relevant memories :contentReference[oaicite:1]{index=1}
+        memory_context: List[str] = []
+        if self.user_id and request.transcript:
+            last_user = request.transcript[-1].content.strip()
+            try:
+                mem_res = self.memory_client.search(
+                    query=last_user,       # non-empty required :contentReference[oaicite:2]{index=2}
+                    version="v2",
+                    filters={"AND": [{"user_id": self.user_id}]},
+                    limit=5
+                )
+                for m in mem_res:
+                    # v2 returns objects with "memory" field
+                    memory_context.append(m.get("memory") or m.get("data", {}).get("memory", ""))
+            except Exception as e:
+                logger.warning("Mem0 search failed, skipping memories: %s", e)
+
+        # — Build system prompt with memories injected —
+        system_content = AGENT_PROMPT
+        if memory_context:
+            snippets = "\n".join(f"- {mem}" for mem in memory_context)
+            system_content = (
+                "Here’s what I remember from our past chats:\n"
+                f"{snippets}\n\n"
+            ) + system_content
+
+        system = {"role": "system", "content": system_content}
         user_msgs = self.convert_transcript_to_openai_messages(request.transcript)
+
         if request.interaction_type == "reminder_required":
             user_msgs.append({
                 "role": "user",
                 "content": "(User idle—please re-engage.)"
             })
+
         return [system] + user_msgs
 
     def prepare_functions(self) -> List[dict]:
@@ -124,28 +182,23 @@ class LlmClient:
         tool_result: str,
     ):
         """
-        Takes the raw tool_result (the <page>…</page> blobs) and asks the LLM
-        to turn it into a concise, friendly answer to the user's original_query.
+        Format raw KB output into a concise reply.
         """
         try:
-            # 1) Build a fresh prompt that tells the model to reformat the KB output.
             formatting_msgs = [
                 {
                     "role": "system",
                     "content": (
                         "You are a professional, friendly AI assistant. "
-                        "The user asked: “" + original_query + "”.\n\n"
-                        "Below is the raw information retrieved from the knowledge base.\n"
-                        "Please condense it into a concise, accurate, and helpful reply. and remove **"
+                        f"The user asked: “{original_query}”.\n\n"
+                        "Below is the information retrieved from the knowledge base. "
+                        "Please condense it into a concise, accurate reply."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": tool_result,
-                },
+                {"role": "user", "content": tool_result},
             ]
 
-            logger.debug("Formatting tool result into final answer…")
+            logger.debug("Formatting tool result…")
             stream = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=formatting_msgs,
@@ -164,7 +217,7 @@ class LlmClient:
                         end_call=False,
                     )
 
-            # signal end of turn
+            # signal end of answer
             if full:
                 yield ResponseResponse(
                     response_id=request.response_id,
@@ -182,8 +235,11 @@ class LlmClient:
                 end_call=False,
             )
 
-
     async def draft_response(self, request: ResponseRequiredRequest):
+        """
+        Main response generator: handles openai function calls, RAG searches, 
+        mem0 persistence, and streaming back to the caller.
+        """
         prompt_msgs = self.prepare_prompt_messages(request)
         logger.debug("Prompt messages:\n%s", json.dumps(prompt_msgs, indent=2))
 
@@ -198,13 +254,14 @@ class LlmClient:
 
             func_name = None
             func_args = ""
+            collected_reply = ""
 
             async for chunk in stream:
-                logger.debug("↳ LLM chunk: %s", chunk)
                 delta = chunk.choices[0].delta
 
-                # 1) Plain-text response
+                # — Plain text content —
                 if delta.content:
+                    collected_reply += delta.content
                     yield ResponseResponse(
                         response_id=request.response_id,
                         content=delta.content,
@@ -212,32 +269,33 @@ class LlmClient:
                         end_call=False,
                     )
 
-                # 2) Collect function name and arguments
+                # — Function call metadata collection —
                 if getattr(delta, "function_call", None):
                     if delta.function_call.name:
                         func_name = delta.function_call.name
                     if delta.function_call.arguments:
                         func_args += delta.function_call.arguments
 
-                # 3) Once the model finishes calling the function, handle it
+                # — When function call completes → execute tool and format response —
                 if chunk.choices[0].finish_reason == "function_call":
                     try:
                         fargs = json.loads(func_args)
                     except json.JSONDecodeError:
-                        logger.exception("Failed to parse function_call JSON: %s", func_args)
+                        logger.exception("Invalid function_call JSON: %s", func_args)
                         yield ResponseResponse(
                             response_id=request.response_id,
-                            content="Sorry, I couldn’t understand the request.",
+                            content="Sorry, I couldn't understand that request.",
                             content_complete=True,
                             end_call=False,
                         )
                         return
 
-                    logger.info("🛠 Executing %s with %s", func_name, fargs)
+                    logger.info("Executing %s with %s", func_name, fargs)
 
                     if func_name == "knowledge_base_search":
                         result = await asyncio.to_thread(
-                            self.rag_handler.search_documents_with_links, fargs.get("query", "")
+                            self.rag_handler.search_documents_with_links,
+                            fargs.get("query", "")
                         )
                         async for evt in self.handle_tool_call_response(
                             request,
@@ -255,6 +313,7 @@ class LlmClient:
                             content_complete=True,
                             end_call=True,
                         )
+
                     else:
                         yield ResponseResponse(
                             response_id=request.response_id,
@@ -264,13 +323,28 @@ class LlmClient:
                         )
                     return
 
-            # no function call: end turn
+            # — No function call → end of turn —
             yield ResponseResponse(
                 response_id=request.response_id,
                 content="",
                 content_complete=True,
                 end_call=False,
             )
+
+            # — Persist turn into Mem0 :contentReference[oaicite:3]{index=3}
+            if self.user_id and request.transcript:
+                last_user = request.transcript[-1].content
+                try:
+                    self.memory_client.add(
+                        [
+                            {"role": "user", "content": last_user},
+                            {"role": "assistant", "content": collected_reply}
+                        ],
+                        user_id=self.user_id,
+                        version="v2",
+                    )
+                except Exception as e:
+                    logger.warning("Failed to store turn in Mem0: %s", e)
 
         except Exception:
             logger.exception("Error during draft_response")
