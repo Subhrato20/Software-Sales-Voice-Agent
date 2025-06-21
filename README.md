@@ -1,4 +1,4 @@
-# CS614 Final Project: The Advanced Software-Sales Voice Agent: A RAG-Enhanced Conversational AI System
+The Advanced Software-Sales Voice Agent: A RAG-Enhanced Conversational AI System
 
 This project implements a sophisticated voice-based AI Software Sales Agent. The agent is designed to interact with prospective customers over the phone, understand their needs, and provide information about software services by leveraging a Retrieval-Augmented Generation (RAG) system.
 
